@@ -31,6 +31,7 @@ class LoopingCall:
 
     def __call__(self):
         self._task = self.loop.create_task(self.func())
+        self._task.add_done_callback(self.callback)
 
     def start(self, interval, now=True):
         self.running = True
@@ -48,7 +49,7 @@ class LoopingCall:
         if self._task is not None:
             self._task.remove_done_callback(self.callback)
             self._task.cancel()
-            self.logger.debug(self._task)
+            # self.logger.debug(self._task)
             self._task = None
         self.logger.debug("Looping Call Stopped")
 
@@ -59,12 +60,15 @@ class ProxyPool:
         self.pool: List[Tuple[bytes, int, bytes, bytes]] = []
         if loop is None:
             loop = asyncio.get_event_loop()
-        self.session = aiohttp.ClientSession(loop=loop)
+        self.session = None
         self.loop = loop
         self.priodically_update = LoopingCall(self.repopulate)
-        self.priodically_update.start(30)
         self.logger = getLogger(self.__class__.__name__)
 
+    async def init_session(self):
+        self.session = aiohttp.ClientSession(loop=self.loop)
+        self.priodically_update.start(15)
+        
     def parse_proxy(self, content):
         for line in BytesIO(content):
             line = line.strip()
@@ -91,10 +95,14 @@ class ProxyPool:
         if not self.pool:
             return (b"", 0, b"", b"")
         return random.choice(self.pool)
+        
+    async def _close_session(self):
+        await self.session.close()
 
-    def close(self):
+    async def close(self):
         self.priodically_update.stop()
-        self.session.close()
+        await self.close_session()
+        # self.session.close()
         self.logger.debug("ProxyPool Stopped")
 
 

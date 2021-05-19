@@ -17,12 +17,12 @@ class HTTPHeaderParser:
 
     async def readStartLine(self):
         self.raw_start_line = await self.reader.readline()
-        self.logger.debug(self.raw_start_line)
+        # self.logger.debug(self.raw_start_line)
         return self.raw_start_line
     
     async def readHeader(self):
         if self.raw_start_line.startswith(b"CONNECT"):
-            self.logger.debug(self.raw_header)
+            # self.logger.debug(self.raw_header)
             return self.raw_header
         header_lines = []
         while 1:
@@ -35,7 +35,7 @@ class HTTPHeaderParser:
                     break
                 header_lines.append(line)
         self.raw_header = b"".join(header_lines)
-        self.logger.debug(self.raw_header)
+        # self.logger.debug(self.raw_header)
         return self.raw_header
 
     async def parseMessage(self):
