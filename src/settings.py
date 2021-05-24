@@ -8,7 +8,8 @@ config.read("config.ini")
 
 PROXY_URL = config["PROXY"]["url"]
 
-PORT = config["SERVER"]["port"]
+PORT = int(config["SERVER"]["port"])
+BACKLOG = int(config["SERVER"]["backlog"])
 
 
 LOGGING_LEVEL = config["LOGGING"]["level"]

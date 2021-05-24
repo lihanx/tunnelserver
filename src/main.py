@@ -4,6 +4,8 @@ import signal
 import asyncio
 from asyncio.streams import StreamReader, StreamReaderProtocol, _DEFAULT_LIMIT
 
+import uvloop
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from parser import HTTPHeaderParser
 from pool import ProxyPool
 from log import getLogger
@@ -13,11 +15,12 @@ import settings
 class ProxyServer(object):
 
     def __init__(self):
-        self.loop = asyncio.get_event_loop()
+        self.loop = uvloop.new_event_loop()
+        asyncio.set_event_loop(self.loop)
         self.proxy_pool = ProxyPool(loop=self.loop)
         self.logger = getLogger(self.__class__.__name__)
         self.srv_task = None
-        self.install_handler()
+        self.install_error_handler()
 
     async def monodirectionalTransport(self, reader, writer):
         while not reader.at_eof() and not writer.is_closing():
@@ -28,11 +31,7 @@ class ProxyServer(object):
                 break
             else:
                 writer.write(chunk)
-                try:
-                    await writer.drain()
-                except Exception as e:
-                    self.logger.error(e)
-                    await asyncio.sleep(0.01)
+                await writer.drain()
         # self.logger.debug("monodirectionalTransport Exit")
         writer.close()
         await writer.wait_closed()
@@ -49,9 +48,7 @@ class ProxyServer(object):
         header_parser = HTTPHeaderParser(reader)
         await header_parser.parseMessage()
         start_line = header_parser.raw_start_line
-
         host, port, username, password = self.proxy_pool.rand_proxy()
-        # self.logger.debug(b"-".join((host, str(port).encode("latin-1"), username, password)))
         header_parser.update_proxy_auth(username, password)
         try:
             pr, pw = await asyncio.open_connection(host=host, port=port)
@@ -59,16 +56,10 @@ class ProxyServer(object):
             self.logger.error(e)
             self.logger.info(b" ".join((start_line.strip(), host, b"Failed")).decode("latin-1"))
         else:
-            # self.logger.debug(header_parser.authed_message)
             pw.write(header_parser.authed_message)
-            try:
-                await pw.drain()
-            except Exception as e:
-                self.logger.info(b" ".join((start_line.strip(), host, b"Failed")).decode("latin-1"))
-                self.logger.error(e)
-            else:
-                await self.bidirectionalTransport((reader, writer), (pr, pw))
-                self.logger.info(b" ".join((start_line.strip(), host, b"Success")).decode("latin-1"))
+            await pw.drain()
+            await self.bidirectionalTransport((reader, writer), (pr, pw))
+            self.logger.info(b" ".join((start_line.strip(), host, b"Success")).decode("latin-1"))
 
     async def start_serve(self, host, port):
         await self.proxy_pool.init_session()
@@ -78,43 +69,41 @@ class ProxyServer(object):
             protocol = StreamReaderProtocol(reader, self.handler, loop=self.loop)
             return protocol
 
-        self._srv = await self.loop.create_server(factory, host, port, backlog=10000)
-        self._waiter = self.loop.create_task(self._srv.serve_forever())
-        self.logger.debug("before wait")
-        # await self._srv.wait_closed()
-        await self._waiter
-        self.logger.debug("after wait")
-        pending = asyncio.all_tasks() - {self.srv_task}
-        self.logger.debug("srv_task in pending: {}".format(self.srv_task in pending))
-        self.logger.debug("srv_task in pending: {}".format(self.srv_task in asyncio.all_tasks()))
-        if pending:
-           await asyncio.gather(*pending)
-        await self.proxy_pool.close()
-        self.logger.debug("after pending done")
+        self._srv = await self.loop.create_server(factory, host, port, backlog=settings.BACKLOG)
+        self.logger.debug("before forever")
+        return self._srv
 
     def run(self, host="0.0.0.0", port=8001):
-        self.srv_task = self.loop.create_task(self.start_serve(host, port))
-        self.srv_task.add_done_callback(lambda _: self.loop.stop())
+        srv =   self.loop.run_until_complete(self.start_serve(host, port))
         try:
             self.loop.run_forever()
-        except Exception as e:
-            self.logger.error(e)
+        except KeyboardInterrupt:
+            pass
         finally:
+            srv.close()
+            self.proxy_pool.close()
+            self.loop.run_until_complete(srv.wait_closed())
+            self.loop.run_until_complete(self.proxy_pool.close_session())
+            self.loop.run_until_complete(self.clean_up())
             self.loop.close()
             self.logger.info("Loop Stopped")
 
-    def install_handler(self):
-        self.loop.add_signal_handler(signal.SIGINT, self.graceful_shutdown)
-        
-    def graceful_shutdown(self):
-        self._srv.close()
-        self._waiter.cancel()
-        self.logger.debug("self._srv.close()")
-        self.logger.debug(asyncio.all_tasks())
-        self.logger.info("Graceful Shutdown..")
-        # self.loop.remove_signal_handler(signal.SIGINT)
+    async def clean_up(self):
+        pending = asyncio.all_tasks()
+        self.logger.info(f"{len(pending)} Task(s) Running")
+        pending = set(filter(lambda p: p.get_coro().__name__ != "clean_up", pending))
+        if not pending:
+            return None
+        await asyncio.gather(*pending)
+
+    def install_error_handler(self):
+
+        def handler(loop, context):
+            self.logger.error(context.get("exception"))
+
+        self.loop.set_exception_handler(handler)
 
 
 if __name__ == "__main__":
     srv = ProxyServer()
-    srv.run("0.0.0.0", 18001)
+    srv.run("0.0.0.0", settings.PORT)

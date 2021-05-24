@@ -49,7 +49,6 @@ class LoopingCall:
         if self._task is not None:
             self._task.remove_done_callback(self.callback)
             self._task.cancel()
-            # self.logger.debug(self._task)
             self._task = None
         self.logger.debug("Looping Call Stopped")
 
@@ -95,14 +94,13 @@ class ProxyPool:
         if not self.pool:
             return (b"", 0, b"", b"")
         return random.choice(self.pool)
-        
-    async def _close_session(self):
-        await self.session.close()
 
-    async def close(self):
+    async def close_session(self):
+        await self.session.close()
+        await asyncio.sleep(0.025)
+
+    def close(self):
         self.priodically_update.stop()
-        await self.close_session()
-        # self.session.close()
         self.logger.debug("ProxyPool Stopped")
 
 
