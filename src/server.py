@@ -1,169 +1,107 @@
 # -*- coding:utf-8 -*-
 
-import sys
-import time
+import signal
 import asyncio
-import logging
-import random
-from io import BytesIO
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__file__)
+from asyncio.streams import StreamReader, StreamReaderProtocol, _DEFAULT_LIMIT
 
-from w3lib.http import basic_auth_header
-import httptools
-import aiohttp
-
-"""
-ProxyServer 功能点
-
-- [ ] 定时更新代理池(background task)
-- [ ] 根据配置文件选项选择代理, 使用镜像启动时, 可以指定 settings.conf
-- [ ] 代理异常信息返回
-"""
+import uvloop
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+from parser import HTTPHeaderParser
+from pool import ProxyPool
+from log import getLogger
+import settings
 
 
-class HTTPRequestHeaders(dict):
-        
-    def on_header(self, name, value):
-        self[name] = value
+class ProxyServer(object):
 
+    def __init__(self):
+        self.loop = uvloop.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.proxy_pool = ProxyPool(loop=self.loop)
+        self.logger = getLogger(self.__class__.__name__)
+        self._srv = None
+        self.install_error_handler()
 
-class HTTPResponseHeaders(dict):
-        
-    def on_header(self, name, value):
-        self[name] = value
-
-
-UPDATE_TIME = 0
-proxies = []
-
-
-async def get_proxy():
-    global UPDATE_TIME
-    global proxies
-    if int(time.time()) - UPDATE_TIME > 30:
-        proxies = []
-        async with aiohttp.ClientSession() as session:
-            async with session.get("http://192.168.132.81/kuaidaili_proxy.txt") as response:
-                content = await response.read()
-                for line in BytesIO(content):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    _, host, port = line.split(b"\t")
-                    _, host = host.split(b"@")
-                    proxies.append((host, int(port)))
-                UPDATE_TIME = int(time.time())
-                logger.debug("UPDATED")
-    return random.choice(proxies)
-
-
-class ProxyServer:
-    
-    async def readStartLine(self, reader):
-        start_line = await reader.readline()
-
-
-    async def readHeader(self, reader):
-        header_lines = []
-        while 1:
+    async def monodirectionalTransport(self, reader, writer):
+        while not reader.at_eof() and not writer.is_closing():
             try:
-                line = await reader.readline()
+                chunk = await reader.read(1<<16)
             except Exception as e:
-                logger.error(e)
+                self.logger.error(e)
                 break
             else:
-                header_lines.append(line)
-                if line == b"\r\n":
-                    break
-        return header_lines[0], b"".join(header_lines)
-    
-    async def monodirectionalStream(self, src, dst, event, flag):
-        while not src.at_eof():
-            try:
-                chunk = await src.read(1<<20)
-            except Exception as e:
-                logger.error(e)
-                break
-            else:
-                dst.write(chunk)
-                try:
-                    await dst.drain()
-                except Exception as e:
-                    logger.error(e)
-        logger.debug(f"{flag} coroutine exit".center(40, "="))
-        dst.close()
-
-    async def bidirectionalStream(self, src_pair, proxy_pair):
-
-        client_r, client_w = src_pair
-        proxy_r, proxy_w = proxy_pair
-
-        event = asyncio.Event()
-        await asyncio.gather(
-            self.monodirectionalStream(client_r, proxy_w, event, "up"),
-            self.monodirectionalStream(proxy_r, client_w, event, "down")
-        )
-        # dst.close()
-
-    async def readBody(self, reader, content_length, chunk_size=1<<10):
-        body_chunks = []
-        received = 0
-        while content_length - received >= chunk_size:
-            chunk = await reader.read(chunk_size)
-            body_chunks.append(chunk)
-            received += chunk_size
-        if received < content_length:
-            chunk = await reader.read(content_length-received)
-            body_chunks.append(chunk)
-        return b"".join(body_chunks)
-    
-    
-    async def handler(self, reader, writer):
-        line1, req_header = await self.readHeader(reader)
-        
-        # logger.debug(req_header)
-        req_headers = HTTPRequestHeaders()
-        body = None
-
-        if not line1.startswith(b"CONNECT"):
-            req_parser = httptools.HttpRequestParser(req_headers)
-            req_parser.feed_data(req_header)
-            
-            content_length = req_headers.get(b"Content-Length")
-            if content_length is not None:
-                body = await self.readBody(reader, int(content_length))
-        logger.debug(line1)
-        host, port = await get_proxy()
-    
-        try:
-            r, w = await asyncio.open_connection(host=host, port=int(port))
-        except Exception as e:
-            logger.error(e)
-            logger.info(b" ".join((line1.strip(), host, b"Failed")).decode("latin-1"))
-        else:
-            req_headers[b"Proxy-Authorization"] = basic_auth_header('lihanx', 'ht2h1mx9', encoding="latin-1")
-            
-            req_header = line1 \
-                    + b"".join(b"%s: %s\r\n" % (k, v) for k, v in req_headers.items()) \
-                    + b"\r\n"
-            
-            # logger.debug(req_header)
-            w.write(req_header)
-            await w.drain()
-
-            await self.bidirectionalStream((reader, writer), (r, w))
-            logger.info(b" ".join((line1.strip(), host, b"Success")).decode("latin-1"))
-            # w.close()
+                writer.write(chunk)
+                await writer.drain()
+        # self.logger.debug("monodirectionalTransport Exit")
         writer.close()
-    
-    
-    async def main(self, host, port):
-        srv = await asyncio.start_server(
-            self.handler, host, port
-        )
-        await srv.serve_forever()
-    
-server = ProxyServer()
-asyncio.run(server.main("0.0.0.0", 18001))
+        await writer.wait_closed()
 
+    async def bidirectionalTransport(self, client_pair, proxy_pair):
+        cr, cw = client_pair
+        pr, pw = proxy_pair
+        await asyncio.gather(
+            self.monodirectionalTransport(cr, pw),
+            self.monodirectionalTransport(pr, cw)
+        )
+
+    async def handler(self, reader, writer):
+        header_parser = HTTPHeaderParser(reader)
+        await header_parser.parseMessage()
+        start_line = header_parser.raw_start_line
+        host, port, username, password = self.proxy_pool.rand_proxy()
+        header_parser.update_proxy_auth(username, password)
+        try:
+            pr, pw = await asyncio.open_connection(host=host, port=port)
+        except Exception as e:
+            self.logger.error(e)
+            self.logger.info(b" ".join((start_line.strip(), host, b"Failed")).decode("latin-1"))
+        else:
+            pw.write(header_parser.authed_message)
+            await pw.drain()
+            await self.bidirectionalTransport((reader, writer), (pr, pw))
+            self.logger.info(b" ".join((start_line.strip(), host, b"Success")).decode("latin-1"))
+
+    async def start_serve(self, host, port):
+        await self.proxy_pool.init_session()
+        
+        def factory():
+            reader = StreamReader(limit=_DEFAULT_LIMIT, loop=self.loop)
+            protocol = StreamReaderProtocol(reader, self.handler, loop=self.loop)
+            return protocol
+
+        return await self.loop.create_server(factory, host, port, backlog=settings.BACKLOG)
+
+    def run(self, host="0.0.0.0", port=8001):
+        srv = self.loop.run_until_complete(self.start_serve(host, port))
+        try:
+            self.loop.run_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            srv.close()
+            self.proxy_pool.close()
+            self.loop.run_until_complete(srv.wait_closed())
+            self.loop.run_until_complete(self.proxy_pool.close_session())
+            self.loop.run_until_complete(self.clean_up())
+            self.loop.close()
+            self.logger.info("Loop Stopped")
+
+    async def clean_up(self):
+        pending = asyncio.all_tasks()
+        self.logger.info(f"{len(pending)} Task(s) Running")
+        pending = set(filter(lambda p: p.get_coro().__name__ != "clean_up", pending))
+        if not pending:
+            return None
+        await asyncio.gather(*pending)
+
+    def install_error_handler(self):
+
+        def handler(loop, context):
+            self.logger.error(context.get("exception"))
+
+        self.loop.set_exception_handler(handler)
+
+
+if __name__ == "__main__":
+    srv = ProxyServer()
+    srv.run("0.0.0.0", settings.PORT)
