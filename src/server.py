@@ -1,8 +1,14 @@
 # -*- coding:utf-8 -*-
 
 import signal
+from concurrent.futures import ThreadPoolExecutor
 import asyncio
-from asyncio.streams import StreamReader, StreamReaderProtocol, _DEFAULT_LIMIT
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+from asyncio.streams import (StreamReader, 
+                             StreamReaderProtocol, 
+                             _DEFAULT_LIMIT)
 
 import uvloop
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -15,55 +21,71 @@ import settings
 class ProxyServer(object):
 
     def __init__(self):
-        self.loop = uvloop.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        self.loop = asyncio.get_event_loop()
+        thread_pool = ThreadPoolExecutor(max_workers=5)
+        self.loop.set_default_executor(thread_pool)
         self.proxy_pool = ProxyPool(loop=self.loop)
-        self.logger = getLogger(self.__class__.__name__)
-        self._srv = None
+        self.logger = getLogger(self.__class__.__name__, export=False)
         self.install_error_handler()
 
     async def monodirectionalTransport(self, reader, writer):
+        """单向数据传输"""
         while not reader.at_eof() and not writer.is_closing():
             try:
                 chunk = await reader.read(1<<16)
+                writer.write(chunk)
             except Exception as e:
                 self.logger.error(e)
                 break
             else:
-                writer.write(chunk)
                 await writer.drain()
-        # self.logger.debug("monodirectionalTransport Exit")
         writer.close()
         await writer.wait_closed()
+        self.logger.debug("reader -> writer closed")
 
     async def bidirectionalTransport(self, client_pair, proxy_pair):
+        """由一对单向传输任务组成双工读写传输"""
         cr, cw = client_pair
         pr, pw = proxy_pair
         await asyncio.gather(
             self.monodirectionalTransport(cr, pw),
             self.monodirectionalTransport(pr, cw)
         )
+        self.logger.debug("bindirectional transport finished")
 
     async def handler(self, reader, writer):
+        """请求处理 Handler"""
         header_parser = HTTPHeaderParser(reader)
         await header_parser.parseMessage()
         start_line = header_parser.raw_start_line
-        host, port, username, password = self.proxy_pool.rand_proxy()
-        header_parser.update_proxy_auth(username, password)
+        host, port = self.proxy_pool.rand_proxy()
+        header_parser.update_proxy_auth()
         try:
             pr, pw = await asyncio.open_connection(host=host, port=port)
         except Exception as e:
             self.logger.error(e)
-            self.logger.info(b" ".join((start_line.strip(), host, b"Failed")).decode("latin-1"))
+            self.logger.info(
+                " ".join((
+                    start_line.decode("latin-1").strip(), 
+                    host + ":" + str(port), 
+                    "Failed"
+                ))
+            )
         else:
             pw.write(header_parser.authed_message)
             await pw.drain()
             await self.bidirectionalTransport((reader, writer), (pr, pw))
-            self.logger.info(b" ".join((start_line.strip(), host, b"Success")).decode("latin-1"))
+            self.logger.info(
+                " ".join((
+                    start_line.decode("latin-1").strip(), 
+                    host + ":" + str(port), 
+                    "Success"
+                ))
+            )
+        del header_parser
 
     async def start_serve(self, host, port):
-        await self.proxy_pool.init_session()
-        
+        """创建服务实例"""
         def factory():
             reader = StreamReader(limit=_DEFAULT_LIMIT, loop=self.loop)
             protocol = StreamReaderProtocol(reader, self.handler, loop=self.loop)
@@ -72,6 +94,8 @@ class ProxyServer(object):
         return await self.loop.create_server(factory, host, port, backlog=settings.BACKLOG)
 
     def run(self, host="0.0.0.0", port=8001):
+        """启动服务，监听指定端口
+        停止时清理环境，平滑退出"""
         srv = self.loop.run_until_complete(self.start_serve(host, port))
         try:
             self.loop.run_forever()
@@ -81,21 +105,22 @@ class ProxyServer(object):
             srv.close()
             self.proxy_pool.close()
             self.loop.run_until_complete(srv.wait_closed())
-            self.loop.run_until_complete(self.proxy_pool.close_session())
             self.loop.run_until_complete(self.clean_up())
+            self.loop.run_until_complete(asyncio.sleep(0.25))
             self.loop.close()
-            self.logger.info("Loop Stopped")
+            self.logger.debug("Loop Stopped")
 
     async def clean_up(self):
+        """清理未完成的任务"""
         pending = asyncio.all_tasks()
-        self.logger.info(f"{len(pending)} Task(s) Running")
+        self.logger.debug(f"{len(pending)} Task(s) Running")
         pending = set(filter(lambda p: p.get_coro().__name__ != "clean_up", pending))
         if not pending:
             return None
         await asyncio.gather(*pending)
 
     def install_error_handler(self):
-
+        """异常处理 handler"""
         def handler(loop, context):
             self.logger.error(context.get("exception"))
 
