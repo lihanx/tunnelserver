@@ -31,15 +31,10 @@ class ProxyServer(object):
     async def monodirectionalTransport(self, reader, writer):
         """单向数据传输"""
         while not reader.at_eof() and not writer.is_closing():
-            # try:
             chunk = await reader.read(1<<16)
             if chunk == b'':
                 break
             await self.loop.run_in_executor(None, writer.write, chunk)
-            # except Exception as e:
-            #     self.logger.error(e)
-            #     break
-            # else:
             await writer.drain()
 
     async def bidirectionalTransport(self, client_pair, proxy_pair):
@@ -49,7 +44,7 @@ class ProxyServer(object):
         await asyncio.wait(
             [self.monodirectionalTransport(cr, pw),
             self.monodirectionalTransport(pr, cw)],
-            timeout=30
+            # timeout=120
         )
         self.logger.debug("bindirectional transport finished")
 
@@ -61,7 +56,7 @@ class ProxyServer(object):
         host, port = self.proxy_pool.rand_proxy()
         header_parser.update_proxy_auth()
         try:
-            pr, pw = await asyncio.open_connection(host=host, port=port)
+            proxy_conn = await self.proxy_pool.open_connection(host, port)
         except Exception as e:
             self.logger.error(e)
             self.logger.info(
@@ -72,9 +67,12 @@ class ProxyServer(object):
                 ))
             )
         else:
-            pw.write(header_parser.authed_message)
-            await pw.drain()
-            await self.bidirectionalTransport((reader, writer), (pr, pw))
+            proxy_conn.writer.write(header_parser.authed_message)
+            await proxy_conn.writer.drain()
+            await self.bidirectionalTransport(
+                (reader, writer), 
+                (proxy_conn.reader, proxy_conn.writer)
+            )
             self.logger.info(
                 " ".join((
                     start_line.decode("latin-1").strip(), 
@@ -82,8 +80,7 @@ class ProxyServer(object):
                     "Success"
                 ))
             )
-            pw.close()
-            # await pw.wait_closed()
+            proxy_conn.release()
         del header_parser
         writer.close()
         # await writer.wait_closed()
@@ -109,6 +106,7 @@ class ProxyServer(object):
         finally:
             srv.close()
             self.proxy_pool.close()
+            self.loop.run_until_complete(self.proxy_pool.close_connections())
             self.loop.run_until_complete(srv.wait_closed())
             self.loop.run_until_complete(self.clean_up())
             self.loop.run_until_complete(asyncio.sleep(0.25))
