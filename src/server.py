@@ -26,30 +26,30 @@ class ProxyServer(object):
         self.loop.set_default_executor(thread_pool)
         self.proxy_pool = ProxyPool(loop=self.loop)
         self.logger = getLogger(self.__class__.__name__, export=False)
-        self.install_error_handler()
+        # self.install_error_handler()
 
     async def monodirectionalTransport(self, reader, writer):
         """单向数据传输"""
         while not reader.at_eof() and not writer.is_closing():
-            try:
-                chunk = await reader.read(1<<16)
-                writer.write(chunk)
-            except Exception as e:
-                self.logger.error(e)
+            # try:
+            chunk = await reader.read(1<<16)
+            if chunk == b'':
                 break
-            else:
-                await writer.drain()
-        writer.close()
-        await writer.wait_closed()
-        self.logger.debug("reader -> writer closed")
+            await self.loop.run_in_executor(None, writer.write, chunk)
+            # except Exception as e:
+            #     self.logger.error(e)
+            #     break
+            # else:
+            await writer.drain()
 
     async def bidirectionalTransport(self, client_pair, proxy_pair):
         """由一对单向传输任务组成双工读写传输"""
         cr, cw = client_pair
         pr, pw = proxy_pair
-        await asyncio.gather(
-            self.monodirectionalTransport(cr, pw),
-            self.monodirectionalTransport(pr, cw)
+        await asyncio.wait(
+            [self.monodirectionalTransport(cr, pw),
+            self.monodirectionalTransport(pr, cw)],
+            timeout=30
         )
         self.logger.debug("bindirectional transport finished")
 
@@ -82,7 +82,12 @@ class ProxyServer(object):
                     "Success"
                 ))
             )
+            pw.close()
+            # await pw.wait_closed()
         del header_parser
+        writer.close()
+        # await writer.wait_closed()
+        self.logger.debug("reader -> writer closed")
 
     async def start_serve(self, host, port):
         """创建服务实例"""
@@ -122,7 +127,7 @@ class ProxyServer(object):
     def install_error_handler(self):
         """异常处理 handler"""
         def handler(loop, context):
-            self.logger.error(context.get("exception"))
+            self.logger.error(context.get("exception", context))
 
         self.loop.set_exception_handler(handler)
 

@@ -5,13 +5,12 @@ metadata:
   labels:
     run: tunnel-kuaidaili
 spec:
+  serviceType: NodePort
   ports:
     - port: 18002
       protocol: TCP
   selector:
     run: tunnel-kuaidaili
-  # externalIPs:
-  #   - xxx.xxx.xxx.xxx
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -29,6 +28,6 @@ spec:
     spec:
       containers:
         - name: tunnel-kuaidaili
-          image: docker-registry.istarshine.net.cn:5000/tunnelproxy:kuaidaili
+          image: harbor.istarshine.com/spider/tunnelproxy:kuaidaili
           ports:
             - containerPort: 18002
