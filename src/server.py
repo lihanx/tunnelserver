@@ -52,20 +52,14 @@ class ProxyServer(object):
         header_parser.update_proxy_auth()
         try:
             proxy_conn = await self.proxy_pool.open_connection(host, port)
-            # pr, pw = await asyncio.open_connection(host, port, limit=LIMIT)
-            # await self.loop.run_in_executor(None, proxy_conn.writer.write, header_parser.authed_message)
-            # pw.write(header_parser.authed_message)
-            # await pw.drain()
             proxy_conn.writer.write(header_parser.authed_message)
             await proxy_conn.writer.drain()
             
             event = asyncio.Event()
             await asyncio.gather(
-                asyncio.wait_for(self.monodirectionalTransport(reader, proxy_conn.writer, event), 10), 
-                # self.monodirectionalTransport(reader, proxy_conn.writer, event), 
-                asyncio.wait_for(self.monodirectionalTransport(proxy_conn.reader, writer, event, True), 10),
+                asyncio.wait_for(self.monodirectionalTransport(reader, proxy_conn.writer, event), 15), 
+                asyncio.wait_for(self.monodirectionalTransport(proxy_conn.reader, writer, event, True), 15),
                 return_exceptions=True
-                # self.monodirectionalTransport(proxy_conn.reader, writer, event, True)
             )
         except Exception as e:
             self.logger.error(e)
