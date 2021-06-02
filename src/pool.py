@@ -133,10 +133,19 @@ class ProxyPool:
     async def open_connection(self, host, port):
         """从连接池中随机获取一个代理连接"""
         ip = f"{host}:{port}"
-        connection = next((conn for conn in self.connections[ip] if not conn.in_use), None)
+        connection = next((
+            conn for conn in self.connections[ip] 
+            if not conn.in_use and not conn.writer.is_closing()
+        ), None)
         if connection is None:
             self.logger.debug(f"Open New Connection {ip}")
             pr, pw = await asyncio.open_connection(host=host, port=port)
+            connection = Connection(host, port, pr, pw)
+            self.connections[ip].append(connection)
+        elif connection.writer.is_closing():
+            self.connections[ip].remove(connection)
+            self.logger.debug(f"Open New Connection {ip}")
+            pr, pw = await asyncio.open_connection(host=host, port=port, limit=1<<22)
             connection = Connection(host, port, pr, pw)
             self.connections[ip].append(connection)
         else:
