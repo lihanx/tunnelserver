@@ -17,7 +17,8 @@ from log import getLogger
 import settings
 
 
-LIMIT = 1 << 16  # 4 MB
+LIMIT = _DEFAULT_LIMIT
+# LIMIT = 1 << 16  # 4 MB
 
 
 class ProxyServer(object):
@@ -31,17 +32,23 @@ class ProxyServer(object):
         self.logger = getLogger(self.__class__.__name__, export=False)
         # self.install_error_handler()
 
-    async def monodirectionalTransport(self, reader, writer, event, close_writer=False):
+    async def monodirectionalTransport(self, reader, writer, close_writer=False):
         start = time.time()
         """单向数据传输"""
         while chunk := await reader.read(LIMIT):
+            if not chunk:
+                break
             if writer.is_closing():
                 break
-            await self.loop.run_in_executor(None, writer.write, chunk)
+            self.logger.debug("Write Data")
+            writer.write(chunk)
             await writer.drain()
+            self.logger.debug(chunk)
+        if close_writer:
+            writer.close()
 
         elapsed = time.time() - start
-        self.logger.debug(f"Elapsed {elapsed} {close_writer}")
+        self.logger.debug(f"Elapsed {elapsed}")
 
     async def handler(self, reader, writer):
         """请求处理 Handler"""
@@ -54,11 +61,11 @@ class ProxyServer(object):
             proxy_conn = await self.proxy_pool.open_connection(host, port)
             proxy_conn.writer.write(header_parser.authed_message)
             await proxy_conn.writer.drain()
-            
-            event = asyncio.Event()
+            self.logger.debug(header_parser.authed_message)
+
             await asyncio.gather(
-                asyncio.wait_for(self.monodirectionalTransport(reader, proxy_conn.writer, event), 15), 
-                asyncio.wait_for(self.monodirectionalTransport(proxy_conn.reader, writer, event, True), 15),
+                asyncio.wait_for(self.monodirectionalTransport(reader, proxy_conn.writer), 10), 
+                asyncio.wait_for(self.monodirectionalTransport(proxy_conn.reader, writer, True), 10),
                 return_exceptions=True
             )
         except Exception as e:
@@ -79,7 +86,6 @@ class ProxyServer(object):
                 ))
             )
             proxy_conn.release()
-        writer.close()
         self.logger.debug("Handler closed")
 
     async def start_serve(self, host, port):
