@@ -38,6 +38,9 @@ FOR:
 func handleConnection(conn *net.TCPConn) {
     defer conn.Close()
     proxy := defaultPool.RandProxy()
+    if proxy == nil {
+        return
+    }
     log.Printf("%s:%d\n", proxy.Host, proxy.Port)
     proxyAddr := &net.TCPAddr{
         IP:   net.ParseIP(proxy.Host),
