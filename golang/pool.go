@@ -11,6 +11,8 @@ import (
     "math/rand"
     "net/http"
     "time"
+
+    log "github.com/sirupsen/logrus"
 )
 
 type Proxy struct {
@@ -42,8 +44,7 @@ func NewProxyPool(URL string) *ProxyPool {
 
 func (p *ProxyPool) Start(interval int) {
     p.Repopulate()
-    ticker := time.Tick(15 * time.Second)
-    // defer close(ticker)
+    ticker := time.Tick(time.Duration(interval) * time.Second)
     for {
         select {
         case <-p.exit:
@@ -72,7 +73,7 @@ func (p *ProxyPool) Repopulate() {
         if err == io.EOF {
             break
         } else if err != nil {
-            fmt.Println(err)
+            log.Debug(err)
             break
         }
         if line == "\n" {
@@ -82,7 +83,7 @@ func (p *ProxyPool) Repopulate() {
         proxy := parsedLine[1]
         port, err := strconv.Atoi(strings.TrimRight(parsedLine[2], "\n"))
         if err != nil {
-            fmt.Println(err)
+            log.Debug(err)
             continue
         }
         if strings.Contains(proxy, "@") {
@@ -107,8 +108,7 @@ func (p *ProxyPool) Repopulate() {
         }
         p.Size++
     }
-    fmt.Println("Repopulate")
-    // fmt.Printf("%+v %d", p.Pool, p.Size)
+    log.Debug(fmt.Sprintf("Repopulate %d", p.Size))
 }
 
 func (p *ProxyPool) RandProxy() *Proxy {
